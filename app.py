@@ -184,7 +184,7 @@ RES = Namespace("https://w3id.org/openheal-tea/resource/")
 
 
 # ---------------------------------------------------------------------------
-# FAIR Knowledge Graph Builder & Natural-Language SPARQL Query Engine
+# FAIR Knowledge Graph Builder, Schema Extractor & Natural-Language Query Engine
 # ---------------------------------------------------------------------------
 def _slugify(val: object) -> str:
     s = re.sub(r"[^A-Za-z0-9._-]+", "_", str(val).strip())
@@ -235,7 +235,6 @@ def build_fair_knowledge_graph(
     dataset_uri = res_ns["dataset/openheal-tea-er"]
     activity_uri = res_ns["activity/dynamic-er-to-fair-kg"]
 
-    # F1/F2/A1/R1: FAIR Dataset & Provenance Metadata
     g.add((dataset_uri, RDF.type, SDO.Dataset))
     g.add((dataset_uri, RDF.type, OWL.Ontology))
     g.add((dataset_uri, DCTERMS.title, Literal("OpenHeal TEA Entity-Relationship Knowledge Graph", lang="en")))
@@ -262,9 +261,9 @@ def build_fair_knowledge_graph(
     g.add((activity_uri, PROV.endedAtTime, Literal(now_iso, datatype=XSD.dateTime)))
     g.add((activity_uri, RDFS.label, Literal("Dynamic ER-to-FAIR-KG Transformation", lang="en")))
 
-    participant_uris = {}  # id_study -> URIRef
-    match_uris = {}        # id_match -> URIRef
-    kin_match_uris = {}    # id_match -> URIRef
+    participant_uris = {}
+    match_uris = {}
+    kin_match_uris = {}
 
     stats_summary = {
         "entities_processed": 0,
@@ -421,6 +420,212 @@ def build_fair_knowledge_graph(
     return g, stats_summary
 
 
+def extract_ontology_schema(kg_graph: Graph, ontology_uri: str) -> dict:
+    """Extracts OWL Classes, ObjectProperties, DatatypeProperties, and a schema-only RDF Graph."""
+    oh_ns = Namespace(ontology_uri if ontology_uri.endswith(("/", "#")) else f"{ontology_uri}#")
+    schema_graph = Graph()
+    schema_graph.bind("oh", oh_ns)
+    schema_graph.bind("owl", OWL)
+    schema_graph.bind("rdfs", RDFS)
+    schema_graph.bind("dcterms", DCTERMS)
+
+    classes = {}
+    for cls_uri in kg_graph.subjects(RDF.type, OWL.Class):
+        if not str(cls_uri).startswith(str(oh_ns)):
+            continue
+        cls_name = str(cls_uri).replace(str(oh_ns), "")
+        comment = next(kg_graph.objects(cls_uri, RDFS.comment), None)
+        inst_count = sum(1 for _ in kg_graph.subjects(RDF.type, cls_uri))
+        classes[cls_name] = {
+            "uri": str(cls_uri),
+            "comment": str(comment) if comment else "",
+            "instances": inst_count,
+            "datatype_props": [],
+        }
+        for p, o in kg_graph.predicate_objects(cls_uri):
+            if p in (RDF.type, RDFS.label, RDFS.comment):
+                continue
+            schema_graph.add((cls_uri, p, o))
+
+    datatype_props = []
+    for prop_uri in kg_graph.subjects(RDF.type, OWL.DatatypeProperty):
+        p_name = str(prop_uri).replace(str(oh_ns), "")
+        domains = [str(d).replace(str(oh_ns), "") for d in kg_graph.objects(prop_uri, RDFS.domain)]
+        desc = next(kg_graph.objects(prop_uri, DCTERMS.description), None)
+        unit = next(kg_graph.objects(prop_uri, oh_ns.unitOrRange), None)
+        interp = next(kg_graph.objects(prop_uri, oh_ns.interpretation), None)
+
+        for p, o in kg_graph.predicate_objects(prop_uri):
+            schema_graph.add((prop_uri, p, o))
+
+        prop_record = {
+            "property": f"oh:{p_name}",
+            "name": p_name,
+            "domains": domains,
+            "domain_str": ", ".join(domains) if domains else "-",
+            "unit_or_range": str(unit) if unit else "",
+            "description": str(desc) if desc else "",
+            "interpretation": str(interp) if interp else "",
+        }
+        datatype_props.append(prop_record)
+        for d in domains:
+            if d in classes:
+                classes[d]["datatype_props"].append(prop_record)
+
+    object_props = []
+    for op_uri in kg_graph.subjects(RDF.type, OWL.ObjectProperty):
+        op_name = str(op_uri).replace(str(oh_ns), "")
+        domains = [str(d).replace(str(oh_ns), "") for d in kg_graph.objects(op_uri, RDFS.domain)]
+        ranges = [str(r).replace(str(oh_ns), "") for r in kg_graph.objects(op_uri, RDFS.range)]
+        comment = next(kg_graph.objects(op_uri, RDFS.comment), None)
+
+        for p, o in kg_graph.predicate_objects(op_uri):
+            schema_graph.add((op_uri, p, o))
+
+        for d in domains or [None]:
+            for r in ranges or [None]:
+                object_props.append({
+                    "predicate": f"oh:{op_name}",
+                    "name": op_name,
+                    "domain": d or "-",
+                    "range": r or "-",
+                    "comment": str(comment) if comment else "",
+                })
+
+    return {
+        "classes": classes,
+        "datatype_props": datatype_props,
+        "object_props": object_props,
+        "schema_graph": schema_graph,
+    }
+
+
+def render_kg_schema_viewer(kg_graph: Graph, ontology_uri: str):
+    """Renders an interactive graph plot and structured inspection of the FAIR KG ontology/schema."""
+    schema_info = extract_ontology_schema(kg_graph, ontology_uri)
+    classes = schema_info["classes"]
+    datatype_props = schema_info["datatype_props"]
+    object_props = schema_info["object_props"]
+    schema_graph: Graph = schema_info["schema_graph"]
+
+    class_colors = {
+        "Participant": "#1E88E5",
+        "CohortSummaryRow": "#7CB342",
+        "GameMatch": "#FB8C00",
+        "MatchKinematics": "#8E24AA",
+        "KinematicWindow": "#D81B60",
+        "SusAssessment": "#00897B",
+    }
+
+    with st.container(border=True):
+        st.markdown("### 🧬 FAIR Knowledge Graph Schema / Ontology Explorer")
+        st.caption(
+            f"Ontology Namespace: `{ontology_uri}` — Visualizing **`{len(classes)}`** `owl:Class` nodes, "
+            f"**`{len(object_props)}`** `owl:ObjectProperty` relations, and **`{len(datatype_props)}`** `owl:DatatypeProperty` attributes."
+        )
+
+        s_m1, s_m2, s_m3 = st.columns(3)
+        s_m1.metric("OWL Classes", len(classes))
+        s_m2.metric("Object Properties (Edges)", len(object_props))
+        s_m3.metric("Datatype Properties (Attributes)", len(datatype_props))
+
+        ctl1, ctl2 = st.columns(2)
+        show_props_in_nodes = ctl1.checkbox("Show datatype properties inside class boxes", value=True, key="kg_schema_show_props")
+        show_denorm_edges = ctl2.checkbox("Show denormalized/secondary object edges", value=True, key="kg_schema_show_sec_edges")
+
+        nodes = []
+        for cls_name, c_meta in classes.items():
+            color_hex = class_colors.get(cls_name, "#38BDF8")
+            prop_names = [p["name"] for p in c_meta["datatype_props"]]
+            header = f"◈ oh:{cls_name}\n({c_meta['instances']:,} instances | {len(prop_names)} props)\n" + "─" * 26
+            if show_props_in_nodes:
+                shown = prop_names[:7]
+                body = "\n".join(f"  • {pn}" for pn in shown)
+                if len(prop_names) > 7:
+                    body += f"\n  ... +{len(prop_names) - 7} more"
+                label = f"{header}\n{body}" if body else header
+            else:
+                label = header
+
+            nodes.append(
+                Node(
+                    id=cls_name,
+                    label=label,
+                    shape="box",
+                    color={
+                        "background": "#0F172A",
+                        "border": color_hex,
+                        "highlight": {"background": "#1E293B", "border": "#FACC15"},
+                    },
+                    borderWidth=3,
+                    font={
+                        "color": "#F8FAFC",
+                        "face": "monospace",
+                        "size": 12,
+                        "align": "left",
+                    },
+                    margin=12,
+                )
+            )
+
+        edges = []
+        for op in object_props:
+            if op["domain"] not in classes or op["range"] not in classes:
+                continue
+            is_secondary = any(k in op["name"].lower() for k in ("participant", "matchkinematics", "participantwindow", "windowofmatch", "kinematicsofmatch"))
+            if not show_denorm_edges and is_secondary:
+                continue
+            edges.append(
+                Edge(
+                    source=op["domain"],
+                    target=op["range"],
+                    label=op["predicate"],
+                    color="#94A3B8" if not is_secondary else "#64748B",
+                    dashes=is_secondary,
+                    font={"color": "#E2E8F0", "size": 11, "align": "top", "strokeWidth": 0},
+                    arrows="to",
+                    smooth={"type": "cubicBezier"},
+                )
+            )
+
+        schema_cfg = Config(
+            width="100%",
+            height=500,
+            directed=True,
+            physics=True,
+            hierarchical=False,
+            nodeHighlightBehavior=True,
+            highlightColor="#FACC15",
+            collapsible=False,
+        )
+        agraph(nodes=nodes, edges=edges, config=schema_cfg)
+
+        st.markdown("#### 📋 Ontology Axioms & Vocabulary Reference")
+        ax_tab1, ax_tab2, ax_tab3 = st.tabs(["Object Properties (Relations)", "Datatype Properties (Codebook)", "Ontology Turtle (.ttl)"])
+
+        with ax_tab1:
+            st.dataframe(pd.DataFrame(object_props)[["predicate", "domain", "range", "comment"]], use_container_width=True, hide_index=True)
+
+        with ax_tab2:
+            prop_filter = st.text_input("Filter properties by name, class, or description:", key="kg_schema_prop_filter", placeholder="e.g., sparc, group, sus, Participant...")
+            dp_df = pd.DataFrame(datatype_props)[["property", "domain_str", "unit_or_range", "description", "interpretation"]]
+            if prop_filter.strip():
+                mask = dp_df.apply(lambda r: r.astype(str).str.contains(prop_filter.strip(), case=False).any(), axis=1)
+                dp_df = dp_df[mask]
+            st.dataframe(dp_df, use_container_width=True, hide_index=True)
+
+        with ax_tab3:
+            schema_ttl = schema_graph.serialize(format="turtle")
+            st.download_button(
+                "⬇️ Download Ontology Schema (.ttl)",
+                data=schema_ttl.encode("utf-8"),
+                file_name="openheal_tea_ontology_schema.ttl",
+                mime="text/turtle",
+                use_container_width=True,
+            )
+            st.code(schema_ttl, language="turtle")
+
+
 def _extract_kg_schema_catalog(kg_graph: Graph, ontology_uri: str) -> dict:
     """Inspects OWL classes and DatatypeProperties directly from the RDF Knowledge Graph."""
     oh_ns = Namespace(ontology_uri if ontology_uri.endswith(("/", "#")) else f"{ontology_uri}#")
@@ -478,14 +683,12 @@ def query_fair_kg_in_natural_language(
     prop_to_classes = catalog["prop_to_classes"]
     q_low = nl_prompt.strip().lower()
 
-    # Match properties mentioned in the natural-language query (longest name first)
     all_props = sorted(prop_to_classes.keys(), key=len, reverse=True)
     mentioned_props = [
         p for p in all_props
         if re.search(rf"\b{re.escape(p.lower())}\b", q_low)
     ]
 
-    # Map synonyms / natural terms to KG properties when exact column names aren't typed
     synonym_map = [
         (r"\b(smoothness|sparc)\b", "sparc_bilateral"),
         (r"\b(jerk|ldlj)\b", "ldlj_bilateral"),
@@ -507,7 +710,6 @@ def query_fair_kg_in_natural_language(
             if re.search(pattern, q_low):
                 mentioned_props.append(mapped_prop)
 
-    # Special Case A: Codebook / Ontology metadata lookup
     if any(k in q_low for k in ("codebook", "metadata", "unit", "definition", "meaning", "what is", "o que é", "describe")):
         target_p = mentioned_props[0] if mentioned_props else None
         filter_clause = f'FILTER(LCASE(STR(?property)) = "{target_p.lower()}")' if target_p else ""
@@ -534,7 +736,6 @@ ORDER BY ?domainClass ?property"""
         )
         return insight, sparql, res_df, None
 
-    # Special Case B: SUS 1..10 item profile across the KG
     if ("sus_1" in q_low or "sus items" in q_low or "items" in q_low) and "sus_1" in prop_to_classes:
         item_triples = "\n  ".join([f"?susNode oh:sus_{i} ?sus_{i} ." for i in range(1, 11)])
         sparql = f"""PREFIX oh: <{oh_prefix}>
@@ -569,8 +770,6 @@ WHERE {{
         insight = "**KG Semantic Analysis:** Mean usability rating across all 10 SUS items (`oh:sus_1`–`oh:sus_10`) joined with `oh:Participant` via `oh:hasSusAssessment`."
         return insight, sparql, summary_df, fig
 
-    # Determine primary target KG class based on mentioned properties
-    # Priority: KinematicWindow > MatchKinematics > GameMatch > SusAssessment > Participant
     class_priority = [
         ("KinematicWindow", "w", "?p oh:hasParticipantWindow ?w ."),
         ("MatchKinematics", "km", "?p oh:hasMatchKinematics ?km ."),
@@ -591,7 +790,6 @@ WHERE {{
             join_pattern = link_triple
             break
 
-    # Build SPARQL SELECT query linking Participant (?p) with the target entity (?selected_var)
     select_vars = ["?id_study", "?group", "?sex", "?age"]
     where_lines = [
         f"?p a oh:Participant ;",
@@ -641,7 +839,6 @@ WHERE {{
             None,
         )
 
-    # Separate categorical vs numeric columns in the SPARQL result set
     cat_candidates = [c for c in ["group", "sex", "phase", "window", "day", "match_number"] if c in df.columns]
     num_candidates = [
         c for c in mentioned_props
@@ -653,7 +850,6 @@ WHERE {{
             if c not in ("id_study", "id_match", "window", "day", "match_number") and pd.api.types.is_numeric_dtype(df[c])
         ]
 
-    # Case 1: Correlation / Scatter between two numeric KG attributes
     if any(k in q_low for k in ("correlat", "scatter", " vs ", "versus", "against", "relationship")) and len(num_candidates) >= 2:
         x_col, y_col = num_candidates[0], num_candidates[1]
         clean = df[[x_col, y_col, "group"]].dropna()
@@ -687,7 +883,6 @@ WHERE {{
         )
         return insight, sparql, summary_df, fig
 
-    # Case 2: Group / Category Comparison on a Numeric KG Attribute
     mentioned_cats = [c for c in mentioned_props if c in cat_candidates]
     group_dim = mentioned_cats[0] if mentioned_cats else ("group" if "group" in df.columns else None)
 
@@ -751,7 +946,6 @@ WHERE {{
         )
         return insight, sparql, summary_df, fig
 
-    # Case 3: Categorical Count / Cross-Tabulation
     if len(mentioned_cats) >= 2:
         c1, c2 = mentioned_cats[0], mentioned_cats[1]
         ct = pd.crosstab(df[c1], df[c2], margins=True, margins_name="Total").reset_index()
@@ -768,7 +962,6 @@ WHERE {{
         insight = f"**KG Contingency Analysis:** Cross-tabulation of **`oh:{c1}`** × **`oh:{c2}`** across n = {len(df)} instances."
         return insight, sparql, ct, fig
 
-    # Default Case: Cohort overview across Participant instances
     counts = df.groupby(["group", "sex"]).size().reset_index(name="Participants")
     fig = px.bar(
         counts,
@@ -982,15 +1175,15 @@ def compute_referential_integrity(loaded_data: dict) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# FAIR Knowledge Graph Panel (with "Ask in Natural Language" Studio)
+# FAIR Knowledge Graph Panel (with Schema/Ontology Plot & NL Query Studio)
 # ---------------------------------------------------------------------------
 def render_fair_kg_modal_or_section(data_dir: str, loaded_data: dict):
-    """Renders FAIR KG conversion options, execution button, NL query studio, chart printing, and downloads."""
+    """Renders FAIR KG conversion options, execution button, schema plot button, NL query studio, and downloads."""
     st.markdown("---")
     st.subheader("🕸️ FAIR Knowledge Graph Converter & Natural Language Query")
     st.caption(
-        "Dynamically transforms all ER entities, foreign-key links, and codebook semantics into a FAIR-compliant RDF graph "
-        "and lets you query the Knowledge Graph in natural language with automated statistics and chart printing."
+        "Dynamically transforms all ER entities, foreign-key links, and codebook semantics into a FAIR-compliant RDF graph, "
+        "plots its ontology/schema, and lets you query the Knowledge Graph in natural language."
     )
 
     opt_c1, opt_c2, opt_c3 = st.columns(3)
@@ -1007,7 +1200,7 @@ def render_fair_kg_modal_or_section(data_dir: str, loaded_data: dict):
     with chk_c2:
         include_derived = st.checkbox("Include Derived Summary Tables (02_cohort)", value=True)
 
-    btn_col1, btn_col2 = st.columns(2)
+    btn_col1, btn_col2, btn_col3 = st.columns(3)
     with btn_col1:
         convert_clicked = st.button(
             "🕸️ Convert ER to FAIR Knowledge Graph",
@@ -1016,6 +1209,14 @@ def render_fair_kg_modal_or_section(data_dir: str, loaded_data: dict):
             key="btn_convert_fair_kg",
         )
     with btn_col2:
+        show_schema_clicked = st.button(
+            "🧬 Show KG Schema / Ontology",
+            type="secondary",
+            use_container_width=True,
+            key="btn_show_kg_schema",
+            help="Plot and inspect the Knowledge Graph OWL classes, object properties, and datatype attributes.",
+        )
+    with btn_col3:
         ask_nl_clicked = st.button(
             "💬 Ask in Natural Language",
             type="secondary",
@@ -1024,8 +1225,7 @@ def render_fair_kg_modal_or_section(data_dir: str, loaded_data: dict):
             help="Query the FAIR Knowledge Graph in natural language to generate charts, printable visualizations, and statistical analyses.",
         )
 
-    # Auto-build the FAIR KG if either button is clicked and no graph exists yet
-    if convert_clicked or (ask_nl_clicked and "fair_kg_graph" not in st.session_state):
+    if convert_clicked or ((show_schema_clicked or ask_nl_clicked) and "fair_kg_graph" not in st.session_state):
         with st.spinner("Building FAIR RDF Knowledge Graph across all ER tables..."):
             kg_graph, kg_stats = build_fair_knowledge_graph(
                 loaded_data=loaded_data,
@@ -1038,10 +1238,17 @@ def render_fair_kg_modal_or_section(data_dir: str, loaded_data: dict):
             st.session_state["fair_kg_graph"] = kg_graph
             st.session_state["fair_kg_stats"] = kg_stats
 
+    if show_schema_clicked:
+        st.session_state["show_kg_schema_viewer"] = not st.session_state.get("show_kg_schema_viewer", False) if False else True
+
     if ask_nl_clicked:
         st.session_state["show_kg_nl_studio"] = True
 
-    # Natural Language Knowledge Graph Query Studio
+    if st.session_state.get("show_kg_schema_viewer") and "fair_kg_graph" in st.session_state:
+        kg_graph: Graph = st.session_state["fair_kg_graph"]
+        kg_stats: dict = st.session_state["fair_kg_stats"]
+        render_kg_schema_viewer(kg_graph, kg_stats.get("ontology_uri", ontology_uri))
+
     if st.session_state.get("show_kg_nl_studio") and "fair_kg_graph" in st.session_state:
         kg_graph: Graph = st.session_state["fair_kg_graph"]
         kg_stats: dict = st.session_state["fair_kg_stats"]
@@ -1099,7 +1306,6 @@ def render_fair_kg_modal_or_section(data_dir: str, loaded_data: dict):
 
                 if result_fig is not None:
                     result_fig.update_layout(height=420, margin=dict(l=25, r=25, t=55, b=30))
-                    # Enable high-resolution PNG camera button in Plotly modebar + print-friendly standalone export
                     st.plotly_chart(
                         result_fig,
                         use_container_width=True,
@@ -1115,12 +1321,10 @@ def render_fair_kg_modal_or_section(data_dir: str, loaded_data: dict):
                         },
                     )
 
-                    # Chart Printing & Data Export Toolbar
                     html_buf = io.StringIO()
                     result_fig.write_html(html_buf, include_plotlyjs="cdn", full_html=True)
                     printable_html = html_buf.getvalue().replace(
                         "</body>",
-                        "<script>window.addEventListener('load', () => { /* Ready for browser Print (Ctrl/Cmd+P) */ });</script>"
                         "<div style='text-align:center;margin:16px;font-family:sans-serif;'>"
                         "<button onclick='window.print()' style='padding:10px 20px;font-size:15px;cursor:pointer;'>🖨️ Print Chart</button>"
                         "</div></body>",
@@ -1989,7 +2193,7 @@ def render_er_model_page(data_dir: str, loaded_data: dict):
             integrity_df = compute_referential_integrity(loaded_data)
             st.dataframe(integrity_df, use_container_width=True, hide_index=True)
 
-        # FAIR Knowledge Graph Converter & Natural Language Query Studio
+        # FAIR Knowledge Graph Converter, Schema Plotter & Natural Language Query Studio
         render_fair_kg_modal_or_section(data_dir, loaded_data)
 
     with col_doc:
