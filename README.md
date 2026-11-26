@@ -1,40 +1,61 @@
-# Tabelas para a análise estatística: estudo OpenHeal TEA (APAE)
+# OpenHeal TEA — Interactive ER Explorer, Data Analyzer & FAIR Knowledge Graph
 
-Crianças e adolescentes com transtorno do espectro autista confirmado pela CARS-2 (GE, n \= 38\) e um grupo controle sem TEA pareado 1:1 por sexo e idade (GC, n \= 38\) jogaram um jogo de rastreamento de mãos por webcam (estourar bolhas na tela). **Dia 1**: uma sessão de 3 partidas, nos dois grupos. **Dia 2**: segunda sessão de 3 partidas, só no GE, cerca de 3,5 meses depois (36 dos 38 voltaram). Ao fim da última sessão de cada participante, a criança respondeu o System Usability Scale (SUS), com ajuda do pesquisador e do profissional da APAE. Não há outros questionários nem testes funcionais neste conjunto de dados.
+An interactive **Streamlit** application for exploring the relational schema, documentation, statistical patterns, and **FAIR** Knowledge Graph representation of the **OpenHeal TEA** study dataset.
 
-Cada tabela tem um `.xlsx` (aba `data` com os dados, aba `codebook` com uma linha por coluna) e um `.md` que explica a tabela e repete o codebook no fim.
+## Key Features
 
-| Tabela | Uma linha por | Linhas | Conteúdo |
-| :---- | :---- | :---- | :---- |
-| `01_participants` | participante | 76 | grupo, sexo, idade, nº de partidas válidas no dia 1 e no dia 2 |
-| `02_cohort` | (descritiva) | \- | Tabela 1 do manuscrito: idade, sexo e partidas por grupo, já com testes |
-| `03_matches` | partida | 333 | identificação da partida e desempenho no jogo: acertos, tempo de reação, distância |
-| `04_kinematics_match` | partida | 333 | cinemática das mãos na partida inteira: velocidade, trajeto, suavidade (SPARC, LDLJ), acoplamento entre mãos |
-| `05_kinematics_window` | partida × janela | 1998 | as mesmas métricas de cinemática em 6 janelas de \~12 s dentro de cada partida |
-| `06_analysis_plan.md` | \- | \- | plano de análise: perguntas, desfechos, modelos, sensibilidade, decisões em aberto |
-| `07_consort.md` \+ `07_consort_flow.png/.svg` | \- | \- | fluxo da amostra (Figura 1\) e o texto *Participants* do Methods |
-| `08_outcomes_by_group.png` | \- | \- | os três desfechos primários por grupo × dia × partida (descritivo) |
-| `09_sus` | participante | 76 | usabilidade (SUS): 10 itens, escore 0-100 e a sessão em que foi respondido |
+- **Interactive Entity-Relationship (ER) Diagram (`streamlit-agraph`)**:
+  - Visualizes study tables, primary/foreign keys (`PK` / `FK`), row and column counts, and cardinality links (`1 : 1`, `1 : N`, `N : 1`).
+  - Clicking any entity node loads its Markdown documentation (`01_participants.md`, `02_cohort.md`, `04_kinematics_match.md`, `05_kinematics_window.md`, or codebook-synthesized documentation when a standalone `.md` file is absent), embedded `codebook` sheet, live data preview, and column statistics.
+  - Runs live referential integrity checks across `id_study` and `id_match`.
+- **Dynamic "Analyze Data" Workspace (`?page=analyze_data`)**:
+  - Opens in a new browser tab/page via the **Analyze data** button.
+  - Automatically refreshes whenever `.xlsx` files change on disk or when cells are edited in the live data grid (`st.data_editor`).
+  - Provides natural-language question answering, suggested queries, auto-discovered insight cards (group comparisons, correlations, and progression trends), custom pivot tables, and correlation heatmaps.
+- **FAIR Knowledge Graph Converter & Natural Language Query Studio**:
+  - Dynamically builds an `rdflib` Knowledge Graph adhering to **Findable, Accessible, Interoperable, and Reusable (FAIR)** principles using typed URIs, `OWL`/`RDFS`/`XSD`/`DCTERMS`/`PROV`/`Schema.org` vocabularies, foreign-key object links, and codebook metadata.
+  - Exports graphs in **Turtle (`.ttl`)**, **JSON-LD (`.jsonld`)**, and **N-Triples (`.nt`)**, supports direct **SPARQL** queries, and includes an **Ask in Natural Language** query studio with statistical summaries, SPARQL provenance inspection, CSV export, and printable/PNG chart downloads.
 
-## Chaves e junções
+## Dataset Entities & Relationships
 
-- `id_study`: o participante. Está em todas as tabelas de dados. Na `09_sus` há uma linha por participante, como na 01\.  
-- `id_match`: a partida. Está nas tabelas 03, 04 e 05\.  
-- `day` (1-2) e `moment` (1-3): a sessão e a ordem da partida dentro dela. `id_study` \+ `day` \+ `moment` identifica a partida tanto quanto `id_match`.  
-- `window` (1-6): a janela dentro da partida, só na 05\.
+| Entity | Primary Key(s) | Foreign Key(s) | Role in Study |
+| :--- | :--- | :--- | :--- |
+| `01_participants` | `id_study` | — | Analytic cohort ($n = 76$: `38` GE with ASD confirmed by CARS-2, `38` GC matched 1:1 by sex and age) |
+| `02_cohort` | `Variable` | `id_study` (aggregated) | Manuscript Table 1 and ABNT sex $\times$ group summary tables derived from `01_participants` |
+| `03_matches` | `id_match` | `id_study` | Match-level game performance across Day 1 (GE & GC) and Day 2 (GE only) |
+| `04_kinematics_match` | `id_match` | `id_study` | Whole-match 2D hand kinematics (`sparc_*`, `speed_mean_*`, `path_length_*`, `ldlj_*`, `traj_corr_*`, `mirror_score`) |
+| `05_kinematics_window` | `id_match`, `window` | `id_match`, `id_study` | Windowed kinematics partitioned into 6 contiguous blocks per match (`early`, `middle`, `late` phases) |
+| `09_sus` | `id_study` | `id_study` | System Usability Scale (SUS) item responses and composite usability score |
 
+## Project Structure
+
+```text
+.
+├── app.py
+├── requirements.txt
+├── README.md
+├── 01_participants.xlsx
+├── 01_participants.md
+├── 02_cohort.xlsx
+├── 02_cohort.md
+├── 03_matches.xlsx
+├── 04_kinematics_match.xlsx
+├── 04_kinematics_match.md
+├── 05_kinematics_window.xlsx
+├── 05_kinematics_window.md
+└── 09_sus.xlsx
 ```
-01_participants (id_study)
-   ├── 09_sus (id_study)                                    1 participante : 1 linha
-   └── 03_matches (id_match, id_study, day, moment)        1 participante : 2-6 partidas
-         ├── 04_kinematics_match (id_match)                 1 partida : 1 linha
-         └── 05_kinematics_window (id_match, window)        1 partida : 6 janelas
-```
 
-`03_matches` e `04_kinematics_match` têm as mesmas 333 partidas, na mesma ordem; juntam-se por `id_match`. `group`, `sex` e `age` estão só na `01_participants`: para usá-los por partida, juntar por `id_study`.
+## Installation & Usage
 
-## Análise
+1. Install the required Python packages:
 
-O desenho completo está em `06_analysis_plan.md`. Em resumo: três desfechos primários por partida (`hit_rate`, `reaction_time_median`, `sparc_bilateral`) em duas análises, (A) GE vs GC no dia 1 e (B) GE dia 1 vs dia 2, ambas com modelos mistos com participante como efeito aleatório; janelas de 12 s como sensibilidade; curso temporal dentro da partida como exploratório. O SUS (09) é descritivo por grupo, com uma comparação GE vs GC.
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-&nbsp;
+2. Run the Streamlit app from the repository directory (or pass a custom dataset directory via the sidebar or `?dir=/path/to/data`):
+
+   ```bash
+   streamlit run app.py
+   ```
