@@ -45,6 +45,8 @@ An interactive **Streamlit** application for exploring the relational schema, do
 ├── 05_kinematics_window.md
 └── 09_sus.xlsx
 ```
+Video with a short draft of the demonstration:
+https://youtu.be/7gbVdmMRTfo
 
 ## Installation & Usage
 
